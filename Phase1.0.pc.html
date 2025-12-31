@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Project Sky Phase 2.4 - Improved Physics</title>
+<style>
+  body { margin: 0; overflow: hidden; cursor: none; font-family: sans-serif; }
+  canvas { display: block; }
+  #crosshair {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 10px; height: 10px;
+    background: rgba(255,255,255,0.5);
+    border: 2px solid white;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="crosshair"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+
+<script type="module">
+  import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/VRButton.js';
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87CEEB);
+  scene.fog = new THREE.FogExp2(0x87CEEB, 0.001);
+
+  const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 2000);
+  const cameraHolder = new THREE.Object3D();
+  cameraHolder.position.set(0, 1.8, 50);
+  cameraHolder.add(camera);
+  scene.add(cameraHolder);
+
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.xr.enabled = true; 
+  document.body.appendChild(renderer.domElement);
+  document.body.appendChild(VRButton.createButton(renderer));
+
+  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+  sun.position.set(50, 100, 50);
+  sun.castShadow = true;
+  sun.shadow.camera.left = -150; sun.shadow.camera.right = 150;
+  sun.shadow.camera.top = 150; sun.shadow.camera.bottom = -150;
+  scene.add(sun);
+  scene.add(new THREE.HemisphereLight(0x87CEEB, 0x1e7f3b, 0.6));
+
+  const loader = new THREE.TextureLoader();
+  loader.setCrossOrigin('anonymous');
+  const collidables = [];
+  const interactables = [];
+  const boulders = [];
+
+  // Ground
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshStandardMaterial());
+  ground.rotation.x = -Math.PI/2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+  collidables.push(ground);
+  loader.load('https://threejs.org/examples/textures/terrain/grasslight-big.jpg', (t) => {
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(60, 60);
+    ground.material.map = t; ground.material.needsUpdate = true;
+  });
+
+  // Mountain
+  const mtnSize = 140;
+  const mtnGeo = new THREE.PlaneGeometry(mtnSize, mtnSize, 50, 50);
+  const pos = mtnGeo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+      let y = pos.getY(i);
+      let dist = (y + mtnSize/2) / mtnSize; 
+      let h = dist > 0.85 ? 0 : Math.pow(dist, 2.8) * 65;
+      h += (Math.random() - 0.5) * 1.5;
+      pos.setZ(i, h);
+  }
+  mtnGeo.computeVertexNormals();
+  const mountain = new THREE.Mesh(mtnGeo, new THREE.MeshStandardMaterial({color: 0x888888}));
+  mountain.rotation.x = -Math.PI/2; mountain.position.set(0, 0, -40);
+  mountain.castShadow = true; mountain.receiveShadow = true;
+  scene.add(mountain);
+  collidables.push(mountain);
+
+  // Boulders
+  const rockGeo = new THREE.DodecahedronGeometry(1.8, 0);
+  for(let i=0; i<25; i++) {
+    const rock = new THREE.Mesh(rockGeo, new THREE.MeshStandardMaterial({color: 0x444444}));
+    rock.position.set(Math.random()*100-50, 5, Math.random()*40 - 20);
+    rock.castShadow = true;
+    rock.userData = {
+      velocity: new THREE.Vector3(0,0,0), 
+      rotVelocity: new THREE.Vector3(0,0,0), 
+      radius: 1.8,
+      applyImpulse: (dir, f) => {
+        rock.userData.velocity.add(dir.multiplyScalar(f));
+        rock.userData.rotVelocity.set(Math.random()*4, Math.random()*4, Math.random()*4);
+      },
+      interact: () => {
+        const d = new THREE.Vector3().subVectors(rock.position, cameraHolder.position).normalize();
+        d.y += 0.4; // Slightly more lift
+        rock.userData.applyImpulse(d, 22);
+      }
+    };
+    scene.add(rock);
+    interactables.push(rock); boulders.push(rock); collidables.push(rock);
+  }
+
+  // Magic Sphere
+  const magicSphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.4,32,32),
+    new THREE.MeshStandardMaterial({color:0x00ffff, emissive: 0x00ffff, emissiveIntensity: 0.5})
+  );
+  magicSphere.position.set(0, 2, 10);
+  magicSphere.userData.interact = () => { magicSphere.material.color.setHex(Math.random() * 0xffffff); };
+  scene.add(magicSphere);
+  interactables.push(magicSphere);
+
+  // Player Logic
+  let moveF=false, moveB=false, moveL=false, moveR=false;
+  let magicPrimed = false, canJump = false;
+  const magicProjectiles = [];
+  const velocity = new THREE.Vector3();
+  let yaw=0, pitch=0;
+  const gravity = -20, playerHeight = 1.8;
+  let prevTime = performance.now();
+
+  document.addEventListener('keydown', (e) => {
+    switch(e.code){
+      case 'KeyS': moveF=true; break; case 'KeyW': moveB=true; break;
+      case 'KeyD': moveL=true; break; case 'KeyA': moveR=true; break;
+      case 'Space': if(canJump) { velocity.y = 10; canJump = false; } break;
+      case 'KeyG': magicPrimed=true; break; case 'KeyF': shootMagic(); break;
+    }
+  });
+  document.addEventListener('keyup', (e) => {
+    switch(e.code){
+      case 'KeyS': moveF=false; break; case 'KeyW': moveB=false; break;
+      case 'KeyD': moveL=false; break; case 'KeyA': moveR=false; break;
+      case 'KeyG': magicPrimed=false; break;
+    }
+  });
+
+  function shootMagic(){
+    if(!magicPrimed) return;
+    const p = magicSphere.clone(); p.material = p.material.clone();
+    p.position.copy(cameraHolder.position);
+    const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+    p.userData.velocity = dir.multiplyScalar(70);
+    magicProjectiles.push(p); scene.add(p); magicPrimed = false;
+  }
+
+  document.body.addEventListener('mousedown', () => {
+    if(document.pointerLockElement !== renderer.domElement) renderer.domElement.requestPointerLock();
+    else {
+      mouseRay.setFromCamera({x:0, y:0}, camera);
+      const hits = mouseRay.intersectObjects(interactables);
+      if(hits.length > 0) hits[0].object.userData.interact();
+    }
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if(document.pointerLockElement === renderer.domElement) {
+        yaw -= e.movementX * 0.002;
+        pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.002));
+    }
+  });
+
+  const raycaster = new THREE.Raycaster();
+  const mouseRay = new THREE.Raycaster();
+
+  function getFloorAt(x, z) {
+    raycaster.set(new THREE.Vector3(x, 200, z), new THREE.Vector3(0,-1,0));
+    const hits = raycaster.intersectObjects(collidables);
+    return hits.length > 0 ? hits[0].point.y : 0;
+  }
+
+  function animate() {
+    const time = performance.now();
+    const delta = Math.min((time - prevTime) / 1000, 0.1);
+    
+    velocity.x -= velocity.x * 10 * delta; velocity.z -= velocity.z * 10 * delta;
+    velocity.y += gravity * delta;
+
+    const moveZ = Number(moveF) - Number(moveB);
+    const moveX = Number(moveL) - Number(moveR);
+    if (moveZ !== 0 || moveX !== 0) {
+      velocity.z += moveZ * 280 * delta; velocity.x += moveX * 280 * delta;
+    }
+
+    cameraHolder.position.x += (velocity.z * Math.sin(yaw) + velocity.x * Math.cos(yaw)) * delta;
+    cameraHolder.position.z += (velocity.z * Math.cos(yaw) - velocity.x * Math.sin(yaw)) * delta;
+    cameraHolder.position.y += velocity.y * delta;
+
+    const pFloor = getFloorAt(cameraHolder.position.x, cameraHolder.position.z) + playerHeight;
+    if (cameraHolder.position.y <= pFloor) {
+      velocity.y = 0; cameraHolder.position.y = pFloor; canJump = true;
+    }
+
+    cameraHolder.rotation.y = yaw;
+    camera.rotation.x = pitch;
+
+    // BOULDER PHYSICS FIX
+    boulders.forEach(rock => {
+        const d = rock.userData;
+        d.velocity.y += gravity * delta;
+        rock.position.add(d.velocity.clone().multiplyScalar(delta));
+        rock.rotation.x += d.rotVelocity.x * delta;
+        rock.rotation.y += d.rotVelocity.y * delta;
+
+        raycaster.set(new THREE.Vector3(rock.position.x, 200, rock.position.z), new THREE.Vector3(0,-1,0));
+        const terrainHits = raycaster.intersectObjects([ground, mountain]);
+        const rFloor = terrainHits.length > 0 ? terrainHits[0].point.y + d.radius : d.radius;
+
+        if (rock.position.y <= rFloor) {
+            rock.position.y = rFloor;
+            // Only stop if the bounce energy is extremely low
+            if (Math.abs(d.velocity.y) > 0.5) { 
+                d.velocity.y *= -0.55; // Better elasticity
+                d.velocity.x *= 0.95;  // Keep horizontal momentum
+                d.velocity.z *= 0.95;
+            } else {
+                // Once vertical bounce stops, still allow rolling friction
+                d.velocity.y = 0;
+                d.velocity.x *= 0.9;
+                d.velocity.z *= 0.9;
+                d.rotVelocity.multiplyScalar(0.9);
+                
+                // Final full stop
+                if(d.velocity.length() < 0.1) {
+                  d.velocity.set(0,0,0);
+                  d.rotVelocity.set(0,0,0);
+                }
+            }
+        }
+    });
+
+    for(let i = magicProjectiles.length - 1; i >= 0; i--){
+      const p = magicProjectiles[i];
+      p.position.add(p.userData.velocity.clone().multiplyScalar(delta));
+      boulders.forEach(rock => {
+        if(p.position.distanceTo(rock.position) < 3) {
+          rock.userData.applyImpulse(p.userData.velocity.clone().normalize(), 35);
+          p.position.set(2000, 2000, 2000); 
+        }
+      });
+      if(p.position.distanceTo(cameraHolder.position) > 500) { scene.remove(p); magicProjectiles.splice(i, 1); }
+    }
+
+    mouseRay.setFromCamera({x:0, y:0}, camera);
+    const hover = mouseRay.intersectObjects(interactables);
+    document.getElementById('crosshair').style.borderColor = hover.length > 0 ? '#00ffff' : 'white';
+
+    magicSphere.position.y = 2 + Math.sin(time * 0.002) * 0.3;
+    prevTime = time;
+    renderer.render(scene, camera);
+  }
+
+  renderer.setAnimationLoop(animate);
+</script>
+</body>
+</html>
