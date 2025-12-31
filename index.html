@@ -222,7 +222,218 @@
         rock.position.y = rFloor;
         if (Math.abs(d.velocity.y) > 0.4) d.velocity.y *= -0.5;
         else d.velocity.set(0,0,0);
+      }<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Project Sky VR - Fixed Controls</title>
+<style>
+  body { margin: 0; overflow: hidden; font-family: sans-serif; }
+  canvas { display: block; }
+  #crosshair {
+    position: absolute; top: 50%; left: 50%;
+    width: 10px; height: 10px;
+    background: rgba(255,255,255,0.5);
+    border: 2px solid white; border-radius: 50%;
+    transform: translate(-50%, -50%); pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="crosshair"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+
+<script type="module">
+  import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/VRButton.js';
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87CEEB);
+  scene.fog = new THREE.FogExp2(0x87CEEB, 0.001);
+
+  const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 2000);
+  
+  // PLAYER RIG (The Dolly)
+  const playerRig = new THREE.Group();
+  playerRig.position.set(0, 0, 50);
+  playerRig.add(camera);
+  scene.add(playerRig);
+
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.xr.enabled = true; 
+  document.body.appendChild(renderer.domElement);
+  document.body.appendChild(VRButton.createButton(renderer));
+
+  // Lights
+  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+  sun.position.set(50, 100, 50);
+  sun.castShadow = true;
+  scene.add(sun);
+  scene.add(new THREE.HemisphereLight(0x87CEEB, 0x1e7f3b, 0.6));
+
+  const loader = new THREE.TextureLoader();
+  const collidables = [];
+  const interactables = [];
+  const boulders = [];
+
+  // Ground
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshStandardMaterial());
+  ground.rotation.x = -Math.PI/2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+  collidables.push(ground);
+  loader.load('https://threejs.org/examples/textures/terrain/grasslight-big.jpg', (t) => {
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(60, 60);
+    ground.material.map = t; ground.material.needsUpdate = true;
+  });
+
+  // Mountain
+  const mtnSize = 140;
+  const mtnGeo = new THREE.PlaneGeometry(mtnSize, mtnSize, 50, 50);
+  const pos = mtnGeo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+      let y = pos.getY(i);
+      let dist = (y + mtnSize/2) / mtnSize; 
+      let h = dist > 0.85 ? 0 : Math.pow(dist, 2.8) * 65;
+      pos.setZ(i, h + (Math.random() - 0.5));
+  }
+  mtnGeo.computeVertexNormals();
+  const mountain = new THREE.Mesh(mtnGeo, new THREE.MeshStandardMaterial({color: 0x888888}));
+  mountain.rotation.x = -Math.PI/2; mountain.position.set(0, 0, -40);
+  mountain.receiveShadow = true;
+  scene.add(mountain);
+  collidables.push(mountain);
+
+  // Boulders
+  const rockGeo = new THREE.DodecahedronGeometry(1.8, 0);
+  for(let i=0; i<25; i++) {
+    const rock = new THREE.Mesh(rockGeo, new THREE.MeshStandardMaterial({color: 0x444444}));
+    rock.position.set(Math.random()*100-50, 10, Math.random()*40 - 20);
+    rock.castShadow = true;
+    rock.userData = {
+      velocity: new THREE.Vector3(0,0,0), 
+      rotVelocity: new THREE.Vector3(0,0,0), 
+      radius: 1.8,
+      applyImpulse: (dir, f) => {
+        rock.userData.velocity.add(dir.multiplyScalar(f));
+        rock.userData.rotVelocity.set(Math.random()*4, Math.random()*4, Math.random()*4);
+      },
+      interact: () => {
+        const d = new THREE.Vector3().subVectors(rock.position, playerRig.position).normalize();
+        d.y += 0.4;
+        rock.userData.applyImpulse(d, 22);
       }
+    };
+    scene.add(rock);
+    interactables.push(rock); boulders.push(rock);
+  }
+
+  // Magic Sphere
+  const magicSphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.4,32,32),
+    new THREE.MeshStandardMaterial({color:0x00ffff, emissive: 0x00ffff, emissiveIntensity: 0.5})
+  );
+  magicSphere.position.set(0, 2, 10);
+  magicSphere.userData.interact = () => { magicSphere.material.color.setHex(Math.random() * 0xffffff); };
+  scene.add(magicSphere);
+  interactables.push(magicSphere);
+
+  // Movement Variables
+  const velocity = new THREE.Vector3();
+  const gravity = -20, playerHeight = 1.8;
+  let prevTime = performance.now();
+  let canJump = false;
+
+  // VR Controller Handling
+  const controller1 = renderer.xr.getController(0);
+  const controller2 = renderer.xr.getController(1);
+  
+  // Trigger interaction for VR
+  function onSelectStart() {
+    mouseRay.setFromCamera({x:0, y:0}, camera);
+    const hits = mouseRay.intersectObjects(interactables);
+    if(hits.length > 0) hits[0].object.userData.interact();
+  }
+  controller1.addEventListener('selectstart', onSelectStart);
+  controller2.addEventListener('selectstart', onSelectStart);
+
+  const raycaster = new THREE.Raycaster();
+  const mouseRay = new THREE.Raycaster();
+
+  function getFloorAt(x, z) {
+    raycaster.set(new THREE.Vector3(x, 200, z), new THREE.Vector3(0,-1,0));
+    const hits = raycaster.intersectObjects([ground, mountain]);
+    return hits.length > 0 ? hits[0].point.y : 0;
+  }
+
+  function handleVRInput(delta) {
+    const session = renderer.xr.getSession();
+    if (!session) return;
+
+    for (const source of session.inputSources) {
+      if (source.gamepad) {
+        const axes = source.gamepad.axes; // 2 and 3 are usually the thumbstick
+        
+        // Left stick (Move)
+        if (source.handedness === 'left') {
+          const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+          forward.y = 0; forward.normalize();
+          const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+          right.y = 0; right.normalize();
+
+          playerRig.position.add(forward.multiplyScalar(-axes[3] * 15 * delta));
+          playerRig.position.add(right.multiplyScalar(axes[2] * 15 * delta));
+        }
+        
+        // Right stick (Snap Turn)
+        if (source.handedness === 'right' && Math.abs(axes[2]) > 0.8) {
+          playerRig.rotation.y -= Math.sign(axes[2]) * 0.05;
+        }
+      }
+    }
+  }
+
+  function animate() {
+    const time = performance.now();
+    const delta = Math.min((time - prevTime) / 1000, 0.1);
+
+    handleVRInput(delta);
+
+    // Gravity for player
+    velocity.y += gravity * delta;
+    playerRig.position.y += velocity.y * delta;
+
+    const pFloor = getFloorAt(playerRig.position.x, playerRig.position.z) + playerHeight;
+    if (playerRig.position.y <= pFloor) {
+      velocity.y = 0; playerRig.position.y = pFloor; canJump = true;
+    }
+
+    // Boulder Physics
+    boulders.forEach(rock => {
+        const d = rock.userData;
+        d.velocity.y += gravity * delta;
+        rock.position.add(d.velocity.clone().multiplyScalar(delta));
+        rock.rotation.x += d.rotVelocity.x * delta;
+
+        const rFloor = getFloorAt(rock.position.x, rock.position.z) + d.radius;
+        if (rock.position.y <= rFloor) {
+            rock.position.y = rFloor;
+            if (Math.abs(d.velocity.y) > 0.5) d.velocity.y *= -0.5;
+            else d.velocity.set(0,0,0);
+        }
+    });
+
+    magicSphere.position.y = 2 + Math.sin(time * 0.002) * 0.3;
+    prevTime = time;
+    renderer.render(scene, camera);
+  }
+
+  renderer.setAnimationLoop(animate);
+</script>
+</body>
+</html>
     });
 
     magicSphere.position.y = 2 + Math.sin(time * 0.002) * 0.3;
